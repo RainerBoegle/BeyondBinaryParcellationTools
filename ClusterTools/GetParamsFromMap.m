@@ -1,0 +1,263 @@
+function [MapExtractStruct] = GetParamsFromMap(MapPath,Thresholds)
+% This function can extract the statistic values & coordinates from a statistics map(NIFTI-volume).
+% Thresholds can be applied.
+%
+%INPUTS:
+%       MapPath       <--   Path to the NIFTI-file that contains statistics values. (Cell-string! If char then will be converted.)
+%                           If 4D, the volume of interest is indicated as in spm_select,
+%                           i.e. MapPath= 'XYZ.nii,7' indicates the 7th volume.  
+%
+%       Thresholds    <--   Thresholds for the statistics values, (2-x-1) vector, any "nan"-valued or "Inf" threshold is skipped.
+%                           The first  ("Thresholds(1)") entry is the negative threshold and 
+%                           the second ("Thresholds(2)") entry is the positive threshold.
+%
+%OUTPUTS:
+%       MapExtractStruct.
+%                       .Thresholds   <--   Positive & Negative threshold for Map (can be "eps" if >0 or <0 is wanted).
+%
+%                       .Negative.    <--   Negative threshold data (if used, otherwise empty)
+%                       .Positive.    <--   Positive threshold data
+%                                .Coords_mm   <<   The mm-coordinates of all significant voxels, i.e. "above" threshold.
+%                                .StatsVals   <<   The statistics values of all significant voxels, i.e. "above" threshold.
+%                                .Coords_vox  <<   The voxel-coordinates of all significant voxels, i.e. "above" threshold.
+%
+%                       .V_map.       <--   SPM-vol struct of the input map (can be used for later output of NIFTI).
+%
+%
+%Usage:
+%       [MapExtractStruct] = GetParamsFromMap(MapPath,Thresholds);
+%       [MapExtractStruct] = GetParamsFromMap(); %select manually
+%       [MapExtractStruct] = GetParamsFromMap([],[-1.4,4.4]); %select NIFTI manually, set thresholds to -1.4 (negative) and 4.4 (positive).
+%
+%V2.0
+%Author: Rainer Boegle (Rainer.Boegle@googlemail.com)
+%Comment V2.0: (26.04.2015): COMPLETE OVERHAUL OF V1.0!!! V1.0: (29.12.2014): initial implementation
+
+%% load map
+try
+    if(isempty(MapPath))
+        MapPath = spm_select(1,'image','Select Statistics-Map for extracting significant values...');
+        MapPath = cellstr(MapPath);
+    else
+        if(ischar(MapPath))
+            MapPath = cellstr(MapPath);
+        else
+            if(iscellstr(MapPath))
+                if(~exist(MapPath{1},'file'))
+                    clear MapPath
+                    MapPath = spm_select(1,'image','Select Statistics-Map for extracting significant values...');
+                    MapPath = cellstr(MapPath);
+                end
+            end
+        end
+    end
+catch CATCH_MapPath
+    disp_catch(CATCH_MapPath,mfilename,'CATCH_MapPath');
+    MapPath = spm_select(1,'image','Select Statistics-Map for extracting significant values...');
+    MapPath = cellstr(MapPath);
+end
+NII_map = nifti(MapPath{1});
+V_map   = spm_vol(MapPath{1});
+%which volume (if 4D)???
+if(length(NII_map.dat.dim)>3)
+    Map_Is4D = 1;
+    [tmp1,tmp2,ext] = fileparts(MapPath{1}); clear tmp1 tmp2
+    Map_4dIndex = eval(ext(find(ext==',')+1:end)); clear ext
+    if(V_map.n(1)~=Map_4dIndex)
+        error(['4D volume index does not fit spm_vol index! (V_map.n(1)=',num2str(V_map.n(1)),'=!=',num2str(Map_4dIndex),')']);
+    else
+        disp(['Loading volume ',num2str(Map_4dIndex),' of "',MapPath{1},'".']);
+    end
+else
+    Map_Is4D = 0;
+    Map_4dIndex = 1; %default
+    disp(['Loading "',MapPath{1},'".']);
+end
+
+
+%% check & set thresholds
+try
+    if(isempty(Thresholds))
+        h=helpdlg({'Both thresholds are empty!!!'; ' '; 'Enter thresholds please.'},'No thresholds?');
+        uiwait(h);
+        Thresholds = getThresholds(); clear h
+    else
+        if(all(isnan(Thresholds))||all(isinf(Thresholds)))
+            h=helpdlg({'Both thresholds are unset!!!'; ' '; 'Enter thresholds please.'},'No thresholds?');
+            uiwait(h);
+            Thresholds = getThresholds(); clear h
+        end
+    end
+catch CATCH_Thresholds
+    disp_catch(CATCH_Thresholds,mfilename,'CATCH_Thresholds')
+    h=helpdlg({'Enter thresholds please.'},'No thresholds?');
+    uiwait(h);
+    Thresholds = getThresholds(); clear h
+end
+
+%% apply thresholds
+MapThresMask_dat= zeros(V_map.dim);
+for IndThres = 1:length(Thresholds)
+    if(~isnan(Thresholds(IndThres))&&~isinf(Thresholds(IndThres)))
+        if(Map_Is4D)
+            tmp = NII_map.dat(:,:,:,Map_4dIndex);
+        else
+            tmp = NII_map.dat(:,:,:);
+        end
+        MapThresMask_dat((sign(Thresholds(IndThres)).*tmp(:))>=(abs(Thresholds(IndThres)))) = 1; clear tmp
+    end
+end
+if(Map_Is4D)
+    Map_dat = squeeze(NII_map.dat(:,:,:,Map_4dIndex).*MapThresMask_dat);
+else
+    Map_dat = NII_map.dat(:,:,:).*MapThresMask_dat;
+end
+
+%% for each threshold get what is above sign(threshold).*Map
+for IndThres = 1:length(Thresholds)
+    if(~isnan(Thresholds(IndThres))&&~isinf(Thresholds(IndThres)))
+        %% get linear indices above threshold
+        LinIndsThres= find((sign(Thresholds(IndThres)).*Map_dat(:))>=(abs(Thresholds(IndThres))));
+        if(isempty(LinIndsThres))
+            disp(['No voxels "above" threshold ',num2str(Thresholds(IndThres)),'. Skipping!']);
+        else
+            if(size(LinIndsThres,2)~=1 && size(LinIndsThres,1)==1)
+                LinIndsThres = LinIndsThres'; %make sure it is a column vector
+            else
+                if(size(LinIndsThres,2)~=1)
+                    error('size(LinIndsThres,2)~=1 && size(LinIndsThres,1)~=1!');
+                end
+            end
+        end
+    else
+        LinIndsThres= [];
+    end
+    %% check if threshold applies    
+    if(~isempty(LinIndsThres))
+        %% get stats vals
+        StatsVals = Map_dat(LinIndsThres);
+        
+        %% get voxel-subscript indices
+        [I1,I2,I3] = ind2sub(V_map.dim,LinIndsThres);
+        Coords_vox = [I1,I2,I3];
+        
+        %% make coords in mm from subscript-voxel coordinates using mat
+        v2m=spm_get_space(V_map.fname);
+        Coords_mm = zeros(size(Coords_vox));
+        for i=1:size(Coords_vox,1)
+            Coords_mm(i,1:3)=Coords_vox(i,:)*v2m(1:3,1:3) + v2m(1:3,4)';
+        end
+        
+        %% apply resorting
+        FinalResortingIndices = ZYXresort(Coords_mm);
+        Coords_mm = Coords_mm( FinalResortingIndices,:);
+        StatsVals = StatsVals( FinalResortingIndices);
+        Coords_vox= Coords_vox(FinalResortingIndices,:);
+        
+        %% assign
+        if(IndThres==1) %negative
+            MapExtractStruct.Negative.Coords_mm = Coords_mm;
+            MapExtractStruct.Negative.StatsVals = StatsVals;
+            MapExtractStruct.Negative.Coords_vox= Coords_vox;
+        else %positive
+            MapExtractStruct.Positive.Coords_mm = Coords_mm;
+            MapExtractStruct.Positive.StatsVals = StatsVals;
+            MapExtractStruct.Positive.Coords_vox= Coords_vox;
+        end
+    else
+        %% assign
+        if(IndThres==1) %negative
+            MapExtractStruct.Negative = [];
+        else %positive
+            MapExtractStruct.Positive = [];
+        end
+    end
+end
+%% check
+if(isempty(MapExtractStruct.Negative)&&isempty(MapExtractStruct.Positive))
+    error('No data extracted at all!');
+end
+
+%% write remaining info to ouput
+%volume info
+MapExtractStruct.V_map  = V_map;
+try
+    if(MapExtractStruct.V_map.dt(1)<16)
+        MapExtractStruct.V_map.dt(1) = 16; %not necessary but save
+    end
+    if(MapExtractStruct.V_map.n(1)~=1)
+        MapExtractStruct.V_map.n(1) = 1; %3D file has only index 1 as forth nothing else.
+    end
+    if(Map_Is4D) %if map is 4D originally then we need to remove this information otherwise spm_write_vol will try to write this as 4D
+        MapExtractStruct.V_map = rmfield(MapExtractStruct.V_map,'private');
+    end
+catch CATCH_changeV_map
+    disp('Could not change V_map!');
+    disp_catch(CATCH_changeV_map,mfilename,'CATCH_changeV_map')
+end
+
+%% thresholds
+MapExtractStruct.Thresholds  = Thresholds;
+
+%% Done.
+disp('Done with extraction of stats-values from NIFTI.');
+
+end
+
+%% subfunction
+function Thresholds = getThresholds()
+% manual selection of thresholds
+%
+
+ThresChoice = questdlg({'Should the map be thresholded specially?'; 'OR just "Map>0" OR "Map<0"?'},'Threshold Map?','Map>0','Map<0','Special Threshold','Map>0');
+switch(ThresChoice)
+    case 'Map>0'
+        Thresholds = [nan,eps];
+        return;
+    case 'Map<0'
+        Thresholds = [-eps,nan];
+        return;
+    case 'Special Threshold'
+        Thresholds = [];
+    otherwise
+        Thresholds = []; %use same as special threshold
+end
+if(isempty(Thresholds))
+    h=helpdlg('Note that one of the Thresholds can be left out by setting it "nan".','Threshold.');
+    uiwait(h);
+    CheckThres = 1;
+    while(CheckThres)
+        ThresMap_answer = inputdlg({'Thres1(Map)= '; 'Thres2(Map)= '},'Map thresholds?',1,{'-4.6';'4.6'});
+        if(isempty(eval(ThresMap_answer{1}))&&isempty(eval(ThresMap_answer{2})))
+            h=helpdlg('AT LEAST ONE THRESHOLD MUST BE NON-EMPTY, i.e. NOT BOTH "[]".','Threshold.');
+            uiwait(h);
+        else
+            if((eval(ThresMap_answer{1})>=0)||(eval(ThresMap_answer{2})<=0))
+                ThresMessage= {};
+                if(eval(ThresMap_answer{1})>=0)
+                    ThresMessage{end+1}= 'Threshold 1 has to be negative!';
+                end
+                if(eval(ThresMap_answer{2})<=0)
+                    ThresMessage{end+1}= 'Threshold 2 has to be positive!';
+                end
+                ThresMessage{end+1}= 'But one can be left out by setting it to "nan".';
+                h=helpdlg(ThresMessage,'Threshold.');
+                uiwait(h);
+                CheckThres = 1;
+            else
+                CheckThres = 0;
+                if(isempty(eval(ThresMap_answer{1})))
+                    ThresMap_answer{1} = 'nan';
+                else
+                    if(isempty(eval(ThresMap_answer{2})))
+                        ThresMap_answer{2} = 'nan';
+                    end
+                end
+            end
+        end
+    end
+    Thresholds(1) = eval(ThresMap_answer{1});
+    Thresholds(2) = eval(ThresMap_answer{2});
+end
+
+end

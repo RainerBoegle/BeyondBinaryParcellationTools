@@ -1,0 +1,262 @@
+function [CompEncodeOutDir,CompEncodeOutPaths,V_SimpleEnc,Y_SimpleEnc,V_Base2Enc,Y_Base2Enc,V_Log2Base2Encode,Y_Log2Base2Encode,V_SumMap,Y_SumMap,V_WinnerTakeAllEncode,Y_WinnerTakeAllEncode,V_OverlapOnly,Y_OverlapOnly,V_UniqueOnly,Y_UniqueOnly] = CreateCompEncodeFromThreshMaps(MixModelStatsDir,UseReThresh,Selection)
+% This function creates the ComponentEndoce NIFTI-files using the thresh_zstatXX NIFTI-files.
+% MixModelStatsDir should be MixModelStatsDir = [MixModelOutDir,filesep,'stats']; 
+% when using CreateMixModelThreshMaps.m to create MixModelOutDir.
+%
+% Created will be a SimpleEncode with all voxels that show overlaps set to "-1" and pure/singular areas get the component index,
+% a Base2Encode with unique areas set to powers of 2 and overlaps indicated by sums of powers of 2. (i.e. clear association via the sum, e.g. 3 is 2+1; 5 is 4+1; 7 is 4+2+1...),
+% a Log2Base2Encode, i.e. just the log2 of the Base2Encode (>0) PLUS 1 such that a display with (rough) distinction of overlaps can be made.
+% a SumMap, i.e. the summation of all significant voxels, indicating per voxel how many significant voxels over all compontent are there.
+% a WinnerTakeAllEncode, i.e. simply checking all components for the highest z-stats value and assigning this component at the voxel. (Simplified version of the selection in the MultiLevelICA paper by Kim et al HBM 2012.)
+% a mask ([0,1]) indicating all OverlapsOnly.
+% a UniqueEncode that indicates the pure7singular areas by component index, i.e the simple encode without all areas that are "-1".
+% 
+%
+%Usage:
+%      [CompEncodeOutDir,CompEncodeOutPaths] = CreateCompEncodeFromThreshMaps(MixModelStatsDir,UseReThresh,Selection);
+%      [CompEncodeOutDir,CompEncodeOutPaths] = CreateCompEncodeFromThreshMaps(); %select stats directory and components manually
+%
+%
+%V1.5
+%Author: Rainer Boegle (Rainer.Boegle@googlemail.com)
+%Comment V1.5: (26.08.2015): extention with Log2Base2Encode, SumMap, OverlapsOnly and UniqueEncode. V1.0: (25.08.2015): initial implementation
+
+%% Check inputs (only MixModelStatsDir & UseReThresh here, later also Selection, see below)
+try
+    if(~exist(MixModelStatsDir,'dir'))
+        MixModelStatsDir = spm_select(1,'dir','Select MixModelStatsDir...');
+        if(~exist([MixModelStatsDir,filesep,'thresh_zstat1.nii'],'file')) %use first IC as an indicator
+            error(['Can not find "thresh_zstat1.nii" in MixModelStatsDir "',MixModelStatsDir,'".']);
+        end
+    else
+        if(~exist([MixModelStatsDir,filesep,'thresh_zstat1.nii'],'file')) %use first IC as an indicator
+            error(['Can not find "thresh_zstat1.nii" in MixModelStatsDir "',MixModelStatsDir,'".']);
+        end
+    end
+catch CATCH_MixModelStatsDir
+    MixModelStatsDir = spm_select(1,'dir','Select MixModelStatsDir...');
+    if(~exist([MixModelStatsDir,filesep,'thresh_zstat1.nii'],'file')) %use first IC as an indicator
+        error(['Can not find "thresh_zstat1.nii" in MixModelStatsDir "',MixModelStatsDir,'".']);
+    end
+    disp_catch(CATCH_MixModelStatsDir,[mfilename,'>CATCH_MixModelStatsDir'],'CATCH_MixModelStatsDir'); %assignin('base','CATCH_MixModelStatsDir',CATCH_MixModelStatsDir);
+end
+%UseReThresh
+try
+    if(isempty(UseReThresh))
+        disp('"UseReThresh" not set! Will default to NOT using ReThresholding of stats-maps produced by MixtureModel-thresholding.');
+        UseReThresh = 0;
+    else
+        if(UseReThresh<=0)
+            UseReThresh = 0;
+            disp('Will NOT use ReThresholding of stats-maps produced by MixtureModel-thresholding!');
+        elseif(UseReThresh>0)
+            UseReThresh = 1;
+            disp('Will USE ReThresholding of stats-maps produced by MixtureModel-thresholding!');
+        end
+    end
+catch CATCH_UseReThresh
+    disp_catch(CATCH_UseReThresh,[mfilename,'>CATCH_UseReThresh'],'CATCH_UseReThresh'); %assignin('base','CATCH_Selection',CATCH_Selection);
+    disp('"UseReThresh" not set! Will default to NOT using ReThresholding of stats-maps produced by MixtureModel-thresholding.');
+    UseReThresh = 0;
+end
+
+%% get number of ICs from MixModelStatsDir
+if(UseReThresh)
+    files = spm_select('List',MixModelStatsDir,'^ReThresh_thresh_zstat\d.nii||^ReThresh_thresh_zstat\d\d.nii');
+    if(isempty(files))
+        error(['ReThresholded stats-maps do not exist in directory "',MixModelStatsDir,'"! Create them first.']);
+    end
+else
+    files = spm_select('List',MixModelStatsDir,'^thresh_zstat\d.nii||^thresh_zstat\d\d.nii');
+end
+NICs  = length(cellstr(files));
+
+%% use all ICs?
+try
+    if(isempty(Selection))
+        [Selection,DoNotUseAll] = listdlg('ListString',cellstr(num2str((1:NICs)')),'CancelString','UseAll','InitialValue',1);
+        if(~DoNotUseAll)
+            Selection = (1:NICs)';
+        end
+    else
+        if(any(isinf(Selection))||any(Selection>NICs))
+            Selection = (1:NICs)'; %use all
+        end
+    end
+catch CATCH_Selection
+    [Selection,DoNotUseAll] = listdlg('ListString',cellstr(num2str((1:NICs)')),'CancelString','UseAll','InitialValue',1);
+    if(~DoNotUseAll)
+        Selection = (1:NICs)';
+    end
+    disp_catch(CATCH_Selection,[mfilename,'>CATCH_Selection'],'CATCH_Selection'); %assignin('base','CATCH_Selection',CATCH_Selection);
+end
+
+%% create paths to ICs used
+DataPaths = cell(length(Selection),1);
+if(UseReThresh)
+    for IndIC = 1:length(Selection)
+        DataPaths{IndIC} = [MixModelStatsDir,filesep,'ReThresh_thresh_zstat',num2str(Selection(IndIC)),'.nii'];
+    end
+else
+    for IndIC = 1:length(Selection)
+        DataPaths{IndIC} = [MixModelStatsDir,filesep,'thresh_zstat',num2str(Selection(IndIC)),'.nii'];
+    end
+end
+
+%% extract thresholds and create SimpleEncode, Base2Encode, OverlapOnly and UniqueOnly volume
+%make output directory
+if(UseReThresh)
+	CompEncodeOutDir  = [MixModelStatsDir,filesep,'CompEncodeUseReThresh_',datestr(now,'yyyymmmdd_HHMM')];
+else
+    CompEncodeOutDir  = [MixModelStatsDir,filesep,'CompEncode_',datestr(now,'yyyymmmdd_HHMM')];
+end
+mkdir(CompEncodeOutDir);
+
+CompEncodeOutPaths= cell(7,1); %SimpleEncode; Base2Encode; OverlapOnly; UniqueEncode
+
+%init using first selected IC
+%SimpleEncode
+V_SimpleEnc = spm_vol(DataPaths{1});
+Y_SimpleEnc = zeros(V_SimpleEnc.dim);
+if(V_SimpleEnc.dt(1)<16)
+    V_SimpleEnc.dt(1)=16; %better encoding with higher quality is needed than eg dt(1)=2. dt(1)=16 is just for safety.
+end
+CompEncodeOutPaths{1} = [CompEncodeOutDir,filesep,'SimpleEncode.nii'];
+V_SimpleEnc.fname     = CompEncodeOutPaths{1};
+
+%Base2Encode
+V_Base2Enc = V_SimpleEnc;
+Y_Base2Enc = zeros(V_Base2Enc.dim);
+if(V_Base2Enc.dt(1)<64)
+    V_Base2Enc.dt(1)=64; %better encoding with higher quality is needed than eg dt(1)=2. dt(1)=64 is just for safety.
+end
+CompEncodeOutPaths{2} = [CompEncodeOutDir,filesep,'Base2Encode.nii'];
+V_Base2Enc.fname      = CompEncodeOutPaths{2};
+
+%Log2Base2Encode
+V_Log2Base2Encode = V_Base2Enc;
+Y_Log2Base2Encode = zeros(V_Log2Base2Encode.dim);
+if(V_Log2Base2Encode.dt(1)<64)
+    V_Log2Base2Encode.dt(1)=64; %better encoding with higher quality
+end
+CompEncodeOutPaths{3}   = [CompEncodeOutDir,filesep,'Log2Base2Encode.nii'];
+V_Log2Base2Encode.fname = CompEncodeOutPaths{3};
+
+%SumMap
+V_SumMap = V_SimpleEnc;
+Y_SumMap = zeros(V_SumMap.dim);
+if(V_SumMap.dt(1)<16)
+    V_SumMap.dt(1)=16; %better encoding with higher quality is needed than eg dt(1)=2. dt(1)=16 is just for safety.
+end
+CompEncodeOutPaths{4} = [CompEncodeOutDir,filesep,'SumMap.nii'];
+V_SumMap.fname        = CompEncodeOutPaths{4};
+
+%WinnerTakeAllEncode
+V_WinnerTakeAllEncode = V_SimpleEnc;
+Y_WinnerTakeAllEncode = zeros(V_WinnerTakeAllEncode.dim);
+if(V_WinnerTakeAllEncode.dt(1)<16)
+    V_WinnerTakeAllEncode.dt(1)=16; %better encoding with higher quality is needed than eg dt(1)=2. dt(1)=16 is just for safety.
+end
+CompEncodeOutPaths{5}       = [CompEncodeOutDir,filesep,'WinnerTakeAllEncode.nii'];
+V_WinnerTakeAllEncode.fname = CompEncodeOutPaths{5};
+
+%OverlapOnly
+V_OverlapOnly = V_SimpleEnc;
+Y_OverlapOnly = zeros(V_OverlapOnly.dim);
+CompEncodeOutPaths{6} = [CompEncodeOutDir,filesep,'OverlapOnly.nii'];
+V_OverlapOnly.fname   = CompEncodeOutPaths{6};
+
+%UniqueEncode
+V_UniqueOnly = V_SimpleEnc;
+Y_UniqueOnly = zeros(V_UniqueOnly.dim);
+CompEncodeOutPaths{7} = [CompEncodeOutDir,filesep,'UniqueOnly.nii'];
+V_UniqueOnly.fname   = CompEncodeOutPaths{7};
+
+%% processing
+%Base2Encode & thresholds
+Thresholds = zeros(length(Selection),2); %pos & neg
+SelectionBase2Encode = zeros(length(Selection),2); %the ic numbers and the corresponding base2encode
+SelectionBase2Encode(:,1) = Selection;
+Data_WinnerSelection = zeros(length(Y_WinnerTakeAllEncode(:)),length(Selection)); %store all stats vals in here
+for IndIC = 1:length(Selection)
+    V_tmp = spm_vol(DataPaths{IndIC});
+    Y_tmp = V_tmp.private.dat(:,:,:);
+    Data_WinnerSelection(:,IndIC) = Y_tmp(:);
+    if(~isempty(min(Y_tmp(Y_tmp>0)))) %pos threshold
+        Thresholds(IndIC,1) = min(Y_tmp(Y_tmp>0));
+    else
+        Thresholds(IndIC,1) = Inf('double');
+    end
+    if(~isempty(max(Y_tmp(Y_tmp<0)))) %neg threshold
+        Thresholds(IndIC,2) = max(Y_tmp(Y_tmp<0));
+    else
+        Thresholds(IndIC,2) = -Inf('double');
+    end
+    Y_SumMap        = Y_SumMap+(Y_tmp~=0); %add all significant ones
+    
+    SelectionBase2Encode(:,2) = 2^(IndIC-1);
+    Y_tmp(Y_tmp~=0) = 2^(IndIC-1); %raise nonzero parts (transformed to logicals) to current power of 2 --> base 2 encode (with next step); NB: need to start at zero.
+    Y_Base2Enc      = Y_Base2Enc+Y_tmp; %adding performs the base 2 encode.
+end
+
+%Log2Base2Encode
+Y_Log2Base2Encode = Y_Base2Enc;
+Y_Log2Base2Encode(Y_Log2Base2Encode>0) = log2(Y_Log2Base2Encode(Y_Log2Base2Encode>0))+1;
+
+%OverlapOnly
+Y_OverlapOnly = Y_Base2Enc;
+for IndIC = 1:length(Selection)
+    Y_OverlapOnly(Y_OverlapOnly==2.^(IndIC-1)) = 0; %remove unique ones
+end
+Y_OverlapOnly = Y_OverlapOnly>0; %make [0,1]-mask
+
+%UniqueOnly
+Y_UniqueOnly = Y_Base2Enc;
+Y_UniqueOnly(Y_OverlapOnly==1) = 0;
+Y_UniqueOnly(Y_UniqueOnly>0)   = log2(Y_UniqueOnly(Y_UniqueOnly>0))+1; %each unique voxels of each component labeled by the component number
+
+%SimpleEncode
+Y_SimpleEnc = Y_Base2Enc;
+Y_SimpleEnc(Y_OverlapOnly==1) = -1; %flip to negative
+Y_SimpleEnc(Y_SimpleEnc>0)    = log2(Y_SimpleEnc(Y_SimpleEnc>0))+2; %each unique voxels of each component labeled by the component number+1
+Y_SimpleEnc(Y_OverlapOnly==1) = 1; %bring back
+
+%WinnerTakeAllEncode: go over nonzero voxels from SumMap
+disp('creating (simple) winner take all map...');
+VoxOfInterest = find(Y_SumMap>0);
+for IndVox = 1:length(VoxOfInterest)
+    [maximum,Y_WinnerTakeAllEncode(VoxOfInterest(IndVox))] = max(Data_WinnerSelection(VoxOfInterest(IndVox),:)); clear maximum
+end    
+
+%% write out results
+%Thresholds, Selections, DataPaths
+save([CompEncodeOutDir,filesep,'Thresholds_n_Selection.mat'],'SelectionBase2Encode','Thresholds','DataPaths');
+%SimpleEncode
+V_SimpleEnc           = spm_write_vol(V_SimpleEnc,      Y_SimpleEnc);
+
+%Base2Encode
+V_Base2Enc            = spm_write_vol(V_Base2Enc,       Y_Base2Enc);
+
+%Log2Base2Encode
+V_Log2Base2Encode     = spm_write_vol(V_Log2Base2Encode,Y_Log2Base2Encode);
+
+%SumMap
+V_SumMap              = spm_write_vol(V_SumMap         ,Y_SumMap);
+
+%WinnerTakeAllEncode
+V_WinnerTakeAllEncode = spm_write_vol(V_WinnerTakeAllEncode,Y_WinnerTakeAllEncode);
+
+%OverlapOnly
+V_OverlapOnly         = spm_write_vol(V_OverlapOnly,    Y_OverlapOnly);
+
+%UniqueOnly
+V_UniqueOnly          = spm_write_vol(V_UniqueOnly,     Y_UniqueOnly);
+
+%% Done.
+disp('Done with creating base2encode NIFTI-files.');
+
+end
+
+    
+
+
